@@ -283,6 +283,8 @@ class AgentLoopBase(ABC):
             processor=self.processor,
         )
         self.loop = get_event_loop()
+        # Whether this trajectory belongs to a validation batch; set by AgentLoopWorker before ``run``.
+        self.validate = False
 
     def _assert_mm_supported(self, has_multi_modal: bool) -> None:
         """Fail loudly when multimodal inputs are present but unsupported.
@@ -495,6 +497,17 @@ used by hydra.utils.instantiate to initialize agent loop instance.
 https://hydra.cc/docs/advanced/instantiate_objects/overview/
 """
 _agent_loop_registry: dict[str, dict] = {}
+
+
+def pop_teacher_context(output: AgentLoopOutput) -> tuple[Optional[list[int]], Optional[dict[str, Any]]]:
+    """Pop the optional privileged teacher context an agent loop placed in ``extra_fields``.
+
+    Done before reward scoring so the context is neither shipped to reward workers nor kept in the batch.
+    """
+    return (
+        output.extra_fields.pop("teacher_prompt_ids", None),
+        output.extra_fields.pop("teacher_multi_modal_data", None),
+    )
 
 
 def register(agent_name: str):
@@ -722,6 +735,7 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
+            agent_loop.validate = trajectory["validate"]
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
@@ -759,6 +773,7 @@ class AgentLoopWorker:
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        teacher_prompt_ids, teacher_multi_modal_data = pop_teacher_context(output)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -857,6 +872,8 @@ class AgentLoopWorker:
             response_ids=output.response_ids,
             validate=validate,
             sample_kwargs=kwargs,
+            teacher_prompt_ids=teacher_prompt_ids,
+            teacher_multi_modal_data=teacher_multi_modal_data,
         )
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
@@ -1066,8 +1083,15 @@ class AgentLoopWorker:
         response_ids: list[int],
         validate: bool,
         sample_kwargs: Optional[dict[str, Any]] = None,
+        teacher_prompt_ids: Optional[list[int]] = None,
+        teacher_multi_modal_data: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Compute teacher logprobs for single sample."""
+        """Compute teacher logprobs for single sample.
+
+        An agent loop may give the teacher a privileged prompt (e.g. extra image crops) by setting
+        ``extra_fields["teacher_prompt_ids"]`` and ``extra_fields["teacher_multi_modal_data"]``; the teacher
+        then scores ``teacher_prompt_ids + response_ids`` and the result is realigned onto the student rows.
+        """
         if self.distillation_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
@@ -1075,13 +1099,31 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
-                multi_modal_data=output.multi_modal_data,
-                mm_processor_kwargs=output.mm_processor_kwargs,
-                mm_processor_output=getattr(output, "mm_processor_output", None),
-                routing_key=routing_key,
-            )
+            if teacher_prompt_ids is not None:
+                from verl.experimental.teacher_loop.teacher_manager import _align_teacher_to_student
+
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=teacher_prompt_ids + response_ids,
+                    multi_modal_data=teacher_multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    routing_key=routing_key,
+                )
+                teacher_ids, teacher_logprobs = _align_teacher_to_student(
+                    teacher_ids,
+                    teacher_logprobs,
+                    teacher_prompt_length=len(teacher_prompt_ids),
+                    student_prompt_length=len(prompt_ids),
+                    response_length=len(response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            else:
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=prompt_ids + response_ids,
+                    multi_modal_data=output.multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    mm_processor_output=getattr(output, "mm_processor_output", None),
+                    routing_key=routing_key,
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 

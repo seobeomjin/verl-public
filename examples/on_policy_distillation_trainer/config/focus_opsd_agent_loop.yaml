@@ -1,0 +1,25 @@
+# Agent loop for on-policy self-distillation whose teacher also sees FOCUS crops
+# (arXiv:2506.21710). Used via actor_rollout_ref.rollout.agent.agent_loop_config_path.
+- name: focus_opsd_agent
+  _target_: verl.experimental.agent_loop.focus_opsd_agent_loop.FocusOPSDAgentLoop
+  # Frozen model FOCUS runs on; null = the student's initial checkpoint (actor_rollout_ref.model.path).
+  focus_model_path: null
+  # GPUs for the shared FOCUS actor. They must be left free outside the trainer / teacher pools.
+  focus_num_gpus: 2
+  focus_worker_kwargs:
+    dtype: bfloat16
+    device_map: auto
+    grid_mode: auto  # Gemma 4 / Qwen-VL grids are computed exactly; others fall back to aspect matching
+  focus_config:
+    k: 30             # anchor points
+    s_min: 3          # ROI side, relevance-map cells (Gemma 4 @ 560 soft tokens: ~19x28 cells)
+    s_max: 7          # pick so a crop spans ~1-2x the vision encoder's base resolution
+    s_dist: 2         # minimum anchor distance
+    n_steps: 4        # ROIs ranked by existence confidence (FOCUS's compute budget)
+    t_type2: 0.5      # confidence threshold for counting-style questions
+    smooth_sigma: 1.0
+    layer_frac: [0.5, 1.0]  # later layers work best (paper: last 25-60%)
+    max_crops: 4
+  teacher_hint: "Zoomed-in views of the image regions relevant to the question:"
+  # Optional per-sample field with known target objects (skips FOCUS's target extraction).
+  targets_key: focus_targets

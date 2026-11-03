@@ -76,6 +76,30 @@ def _pad_teacher_outputs(
     )
 
 
+def _align_teacher_to_student(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    teacher_prompt_length: int,
+    student_prompt_length: int,
+    response_length: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Realign teacher outputs scored under a different prompt onto the student's ``prompt + response`` rows.
+
+    Row ``i`` of the teacher outputs scores token ``i + 1`` (the last row is a dummy), so the rows that score
+    the response start one before the response: teacher rows ``[Tp - 1, Tp + R)`` move to student rows
+    ``[P - 1, P + R)``. The remaining prompt rows are filled with padding; they are masked out by the
+    response mask in the distillation loss.
+    """
+    assert teacher_ids.shape[0] == teacher_prompt_length + response_length, teacher_ids.shape
+    assert teacher_prompt_length >= 1 and student_prompt_length >= 1
+    rows = slice(teacher_prompt_length - 1, teacher_prompt_length + response_length)
+    fill = student_prompt_length - 1
+    ids = torch.full((fill, *teacher_ids.shape[1:]), pad_token_id, dtype=teacher_ids.dtype)
+    logprobs = torch.zeros((fill, *teacher_logprobs.shape[1:]), dtype=teacher_logprobs.dtype)
+    return torch.cat([ids, teacher_ids[rows]]), torch.cat([logprobs, teacher_logprobs[rows]])
+
+
 class AsyncTeacherLLMServerManager:
     """Teacher-specific async client used for distillation logprob computation."""
 

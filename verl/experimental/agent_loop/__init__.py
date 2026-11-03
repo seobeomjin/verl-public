@@ -19,10 +19,11 @@ from .agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from .focus_opsd_agent_loop import FocusOPSDAgentLoop
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop]
+_ = [SingleTurnAgentLoop, ToolAgentLoop, FocusOPSDAgentLoop]
 
 __all__ = [
     "AgentLoopBase",

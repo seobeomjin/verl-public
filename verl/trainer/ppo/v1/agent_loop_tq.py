@@ -31,6 +31,7 @@ from verl.experimental.agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from verl.experimental.agent_loop.agent_loop import pop_teacher_context
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -162,9 +163,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
+        final_output = outputs[-1]
+        teacher_prompt_ids, teacher_multi_modal_data = pop_teacher_context(final_output)
         await self._compute_score(outputs, kwargs=kwargs)
 
-        final_output = outputs[-1]
         # TODO: Support output:list[AgentLoopOutput]
         await self._compute_teacher_logprobs(
             final_output,
@@ -172,6 +174,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             response_ids=final_output.response_ids,
             validate=validate,
             sample_kwargs=kwargs,
+            teacher_prompt_ids=teacher_prompt_ids,
+            teacher_multi_modal_data=teacher_multi_modal_data,
         )
 
         if final_output.reward_score is not None:
